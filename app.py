@@ -6,66 +6,82 @@ from scipy import ndimage as ndi
 from PIL import Image
 
 st.set_page_config(page_title="Cell Counter", layout="wide")
-st.title("🔬 Cell Counter: Precision Masking")
+st.title("🔬 Cell Counter: Advanced Shape Designer")
 
 # --- SIDEBAR: CHIP SHAPE DESIGNER ---
 st.sidebar.header("📐 Chip Shape Designer")
-st.sidebar.caption("Align the bright area with the inside of your chip.")
+st.sidebar.caption("Define the exact internal geometry of your chip.")
 
-# 4-Side Independent Trimming
-t_trim = st.sidebar.slider("Top Trim", 0, 800, 100)
-b_trim = st.sidebar.slider("Bottom Trim", 0, 800, 100)
-l_trim = st.sidebar.slider("Left Trim", 0, 800, 50)
-r_trim = st.sidebar.slider("Right Trim", 0, 800, 50)
+# Individual side controls
+with st.sidebar.expander("✂️ Boundary Trims (px)", expanded=True):
+    t_trim = st.slider("Top Trim (px)", 0, 800, 100)
+    b_trim = st.slider("Bottom Trim (px)", 0, 800, 100)
+    l_trim = st.slider("Left Trim (px)", 0, 800, 50)
+    r_trim = st.slider("Right Trim (px)", 0, 800, 50)
 
-corner_radius = st.sidebar.slider("Corner Rounding (Semicircle)", 0, 400, 100)
+# Individual corner controls
+with st.sidebar.expander("🌀 Corner Rounding (px)", expanded=True):
+    tl_rad = st.slider("Top-Left Radius (px)", 0, 400, 100)
+    tr_rad = st.slider("Top-Right Radius (px)", 0, 400, 100)
+    bl_rad = st.slider("Bottom-Left Radius (px)", 0, 400, 100)
+    br_rad = st.slider("Bottom-Right Radius (px)", 0, 400, 100)
 
 st.sidebar.markdown("---")
-st.sidebar.header("⚙️ Detection Settings")
-sensitivity = st.sidebar.slider("Sensitivity (Brightness)", 0.1, 1.5, 0.5, 0.1, help="Lower = Catch faint cells")
-roundness = st.sidebar.slider("Roundness Tolerance", 0.5, 1.0, 0.95, 0.05, help="1.0 = Allow ovals")
 
-st.sidebar.subheader("📏 Size Filters (Pixels)")
-min_area = st.sidebar.number_input("Min Cell Size", 1, 100, 15, help="Filters out tiny dust/specks")
-max_area = st.sidebar.number_input("Max Cell Size", 100, 5000, 800, help="Filters out large scratches/clumps")
+# Detection Settings
+st.sidebar.header("⚙️ Detection Settings")
+sensitivity = st.sidebar.slider("Sensitivity (x)", 0.1, 1.5, 0.5, 0.1, help="Multiplier for the brightness threshold. Lower = More sensitive.")
+roundness = st.sidebar.slider("Roundness (Eccentricity)", 0.5, 1.0, 0.95, 0.05, help="0.0 = Circle, 1.0 = Line. Filters out elongated scratches.")
+
+# Size Filters
+st.sidebar.subheader("📏 Size Filters ($px^2$)")
+min_area = st.sidebar.number_input("Min Area ($px^2$)", 1, 100, 15)
+max_area = st.sidebar.number_input("Max Area ($px^2$)", 100, 5000, 800)
 
 # --- FUNCTIONS ---
 
-def create_rounded_mask(h, w, t, b, l, r, radius):
+def create_custom_mask(h, w, t, b, l, r, tl, tr, bl, br):
+    """ Generates a mask with 4 independent trims and 4 independent corner radii """
     mask = np.zeros((h, w), dtype=np.uint8)
     y1, y2 = t, h - b
     x1, x2 = l, w - r
     
-    # Safety check for radius
-    radius = max(0, min(radius, (y2 - y1) // 2, (x2 - x1) // 2))
+    # Ensure inner box is valid
+    if y2 <= y1 or x2 <= x1: return mask.astype(bool)
+
+    # Drawing the complex shape
+    # 1. Main rectangles (cross shape to fill center)
+    max_r = max(tl, tr, bl, br)
+    cv2.rectangle(mask, (x1 + max_r, y1), (x2 - max_r, y2), 1, -1)
+    cv2.rectangle(mask, (x1, y1 + max_r), (x2, y2 - max_r), 1, -1)
     
-    # Draw the rounded rectangle
-    cv2.rectangle(mask, (x1 + radius, y1), (x2 - radius, y2), 1, -1)
-    cv2.rectangle(mask, (x1, y1 + radius), (x2, y2 - radius), 1, -1)
-    if radius > 0:
-        cv2.circle(mask, (x1 + radius, y1 + radius), radius, 1, -1)
-        cv2.circle(mask, (x2 - radius, y1 + radius), radius, 1, -1)
-        cv2.circle(mask, (x1 + radius, y2 - radius), radius, 1, -1)
-        cv2.circle(mask, (x2 - radius, y2 - radius), radius, 1, -1)
+    # 2. Variable corners
+    if tl > 0: cv2.circle(mask, (x1 + tl, y1 + tl), tl, 1, -1)
+    else: cv2.rectangle(mask, (x1, y1), (x1+max_r, y1+max_r), 1, -1)
+    
+    if tr > 0: cv2.circle(mask, (x2 - tr, y1 + tr), tr, 1, -1)
+    else: cv2.rectangle(mask, (x2-max_r, y1), (x2, y1+max_r), 1, -1)
+    
+    if bl > 0: cv2.circle(mask, (x1 + bl, y2 - bl), bl, 1, -1)
+    else: cv2.rectangle(mask, (x1, y2-max_r), (x1+max_r, y2), 1, -1)
+    
+    if br > 0: cv2.circle(mask, (x2 - br, y2 - br), br, 1, -1)
+    else: cv2.rectangle(mask, (x2-max_r, y2-max_r), (x2, y2), 1, -1)
+    
     return mask.astype(bool)
 
 @st.cache_data
 def analyze_cells(img, mask, sens, round_val, min_a, max_a):
-    """ Heavy math triggered only by the button """
-    # Scale bar wipe
     clean = np.copy(img)
     clean[-50:, :] = 0
-    
     top_hat = morphology.white_tophat(clean, morphology.disk(15))
     bw = (top_hat > (filters.threshold_otsu(top_hat) * sens)) & mask
-
     dist = ndi.distance_transform_edt(bw)
     peaks = feature.peak_local_max(dist, min_distance=4, labels=bw)
     m = np.zeros(dist.shape, dtype=bool)
     if len(peaks) > 0: m[tuple(peaks.T)] = True
     markers, _ = ndi.label(m)
     labels = segmentation.watershed(-dist, markers, mask=bw)
-
     regions = measure.regionprops(labels)
     valid = [r for r in regions if min_a <= r.area <= max_a and r.eccentricity < round_val]
     return valid
@@ -74,7 +90,6 @@ def analyze_cells(img, mask, sens, round_val, min_a, max_a):
 uploaded_file = st.file_uploader("Upload Image", type=["jpg", "png", "tif", "tiff"])
 
 if uploaded_file:
-    # 1. Load Image
     raw_img = np.array(Image.open(uploaded_file))
     if len(raw_img.shape) == 3:
         gray_img = color.rgb2gray(raw_img[:, :, :3])
@@ -83,51 +98,36 @@ if uploaded_file:
     
     h, w = gray_img.shape
     
-    # 2. Update Mask (Instant)
-    analysis_mask = create_rounded_mask(h, w, t_trim, b_trim, l_trim, r_trim, corner_radius)
+    # 1. Update Mask (Instant)
+    analysis_mask = create_custom_mask(h, w, t_trim, b_trim, l_trim, r_trim, tl_rad, tr_rad, bl_rad, br_rad)
     
-    # 3. Create Shaded Overlay Preview
-    # Create a red-tinted version of the image
+    # 2. Red Overlay Preview
     overlay = (gray_img * 255).astype(np.uint8)
     overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2RGB)
-    
-    # Create a red 'shroud' for ignored areas
     red_shroud = np.zeros_like(overlay)
-    red_shroud[:] = [255, 0, 0] # Red color
+    red_shroud[:] = [255, 0, 0]
+    overlay[~analysis_mask] = cv2.addWeighted(overlay[~analysis_mask], 0.7, red_shroud[~analysis_mask], 0.3, 0)
     
-    # Blend the original with red for ignored areas (0.3 alpha)
-    ignored_area = ~analysis_mask
-    overlay[ignored_area] = cv2.addWeighted(overlay[ignored_area], 0.7, red_shroud[ignored_area], 0.3, 0)
-    
-    # --- DISPLAY LAYOUT ---
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("Step 1: Design Mask")
-        st.caption("Red area is IGNORED. Align the bright center with your channel.")
+        st.subheader("Step 1: Align Mask")
         st.image(overlay, use_column_width=True)
-        
-        # THE BIG BUTTON: Prevents the app from running heavy math on every slider move
-        run_btn = st.button("🚀 Start Cell Count", use_container_width=True)
+        run_btn = st.button("🚀 Run Analysis", use_container_width=True)
 
     with col2:
-        st.subheader("Step 2: Analysis Results")
-        
-        # Only run if the button is clicked or if we've already run it once
+        st.subheader("Step 2: Results")
         if run_btn:
-            with st.spinner("Processing Watershed Analysis..."):
+            with st.spinner("Counting..."):
                 cells = analyze_cells(gray_img, analysis_mask, sensitivity, roundness, min_area, max_area)
-                
-                # Draw circles on results
                 res_disp = (gray_img * 255).astype(np.uint8)
                 res_disp = cv2.cvtColor(res_disp, cv2.COLOR_GRAY2RGB)
                 for c in cells:
                     y, x = c.centroid
                     rad = int(c.equivalent_diameter_area / 2 * 1.2)
-                    cv2.circle(res_disp, (int(x), int(y)), rad, (0, 255, 0), 2) # Green circles for clarity
+                    cv2.circle(res_disp, (int(x), int(y)), rad, (0, 255, 0), 2)
                 
                 st.image(res_disp, use_column_width=True)
-                st.metric("Total Count", len(cells))
-                st.success("Analysis Complete!")
+                st.metric("Cell Count", len(cells))
         else:
-            st.info("Adjust the mask on the left, then click 'Start Cell Count'.")
+            st.info("Design your mask on the left, then click 'Run Analysis'.")
