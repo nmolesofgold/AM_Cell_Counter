@@ -4,71 +4,78 @@ import cv2
 from skimage import color, filters, feature, segmentation, measure, morphology
 from scipy import ndimage as ndi
 from PIL import Image
+import pandas as pd
+import io
 
 st.set_page_config(page_title="Cell Counter", layout="wide")
-st.title("🔬 Cell Counter: Advanced Shape Designer")
+st.title("🔬 Cell Counter: High-Res Shape Designer")
 
 # --- SIDEBAR: CHIP SHAPE DESIGNER ---
 st.sidebar.header("📐 Chip Shape Designer")
-st.sidebar.caption("Define the exact internal geometry of your chip.")
+st.sidebar.caption("Define the exact internal geometry. Units are in Pixels (px).")
 
-# Individual side controls
+# High-Range side controls
 with st.sidebar.expander("✂️ Boundary Trims (px)", expanded=True):
-    t_trim = st.slider("Top Trim (px)", 0, 800, 100)
-    b_trim = st.slider("Bottom Trim (px)", 0, 800, 100)
-    l_trim = st.slider("Left Trim (px)", 0, 800, 50)
-    r_trim = st.slider("Right Trim (px)", 0, 800, 50)
+    t_trim = st.slider("Top Trim (px)", 0, 2000, 100)
+    b_trim = st.slider("Bottom Trim (px)", 0, 2000, 100)
+    l_trim = st.slider("Left Trim (px)", 0, 2000, 50)
+    r_trim = st.slider("Right Trim (px)", 0, 2000, 50)
 
-# Individual corner controls
+# High-Range corner controls
 with st.sidebar.expander("🌀 Corner Rounding (px)", expanded=True):
-    tl_rad = st.slider("Top-Left Radius (px)", 0, 400, 100)
-    tr_rad = st.slider("Top-Right Radius (px)", 0, 400, 100)
-    bl_rad = st.slider("Bottom-Left Radius (px)", 0, 400, 100)
-    br_rad = st.slider("Bottom-Right Radius (px)", 0, 400, 100)
+    st.caption("Set radius to half the channel height for a perfect semicircle.")
+    tl_rad = st.slider("Top-Left Radius (px)", 0, 3000, 100)
+    tr_rad = st.slider("Top-Right Radius (px)", 0, 3000, 100)
+    bl_rad = st.slider("Bottom-Left Radius (px)", 0, 3000, 100)
+    br_rad = st.slider("Bottom-Right Radius (px)", 0, 3000, 100)
 
 st.sidebar.markdown("---")
 
 # Detection Settings
 st.sidebar.header("⚙️ Detection Settings")
-sensitivity = st.sidebar.slider("Sensitivity (x)", 0.1, 1.5, 0.5, 0.1, help="Multiplier for the brightness threshold. Lower = More sensitive.")
-roundness = st.sidebar.slider("Roundness (Eccentricity)", 0.5, 1.0, 0.95, 0.05, help="0.0 = Circle, 1.0 = Line. Filters out elongated scratches.")
+sensitivity = st.sidebar.slider("Sensitivity (x)", 0.1, 1.5, 0.5, 0.1)
+roundness = st.sidebar.slider("Roundness (Eccentricity)", 0.5, 1.0, 0.95, 0.05)
 
 # Size Filters
-st.sidebar.subheader("📏 Size Filters ($px^2$)")
-min_area = st.sidebar.number_input("Min Area ($px^2$)", 1, 100, 15)
-max_area = st.sidebar.number_input("Max Area ($px^2$)", 100, 5000, 800)
+st.sidebar.subheader("📏 Size Filters (px²)")
+min_area = st.sidebar.number_input("Min Area (px²)", 1, 500, 15)
+max_area = st.sidebar.number_input("Max Area (px²)", 100, 10000, 800)
 
-# --- FUNCTIONS ---
+# --- MASKING ENGINE ---
 
 def create_custom_mask(h, w, t, b, l, r, tl, tr, bl, br):
-    """ Generates a mask with 4 independent trims and 4 independent corner radii """
     mask = np.zeros((h, w), dtype=np.uint8)
     y1, y2 = t, h - b
     x1, x2 = l, w - r
     
-    # Ensure inner box is valid
     if y2 <= y1 or x2 <= x1: return mask.astype(bool)
 
-    # Drawing the complex shape
-    # 1. Main rectangles (cross shape to fill center)
-    max_r = max(tl, tr, bl, br)
-    cv2.rectangle(mask, (x1 + max_r, y1), (x2 - max_r, y2), 1, -1)
-    cv2.rectangle(mask, (x1, y1 + max_r), (x2, y2 - max_r), 1, -1)
+    # 1. Draw the base rectangle
+    cv2.rectangle(mask, (x1, y1), (x2, y2), 1, -1)
     
-    # 2. Variable corners
-    if tl > 0: cv2.circle(mask, (x1 + tl, y1 + tl), tl, 1, -1)
-    else: cv2.rectangle(mask, (x1, y1), (x1+max_r, y1+max_r), 1, -1)
+    # 2. Subtract the corners (Inverse Masking)
+    # This method is more robust for massive radii
+    corner_mask = np.ones((h, w), dtype=np.uint8)
     
-    if tr > 0: cv2.circle(mask, (x2 - tr, y1 + tr), tr, 1, -1)
-    else: cv2.rectangle(mask, (x2-max_r, y1), (x2, y1+max_r), 1, -1)
-    
-    if bl > 0: cv2.circle(mask, (x1 + bl, y2 - bl), bl, 1, -1)
-    else: cv2.rectangle(mask, (x1, y2-max_r), (x1+max_r, y2), 1, -1)
-    
-    if br > 0: cv2.circle(mask, (x2 - br, y2 - br), br, 1, -1)
-    else: cv2.rectangle(mask, (x2-max_r, y2-max_r), (x2, y2), 1, -1)
-    
-    return mask.astype(bool)
+    # Top-Left
+    if tl > 0:
+        cv2.rectangle(corner_mask, (x1, y1), (x1+tl, y1+tl), 0, -1)
+        cv2.circle(corner_mask, (x1+tl, y1+tl), tl, 1, -1)
+    # Top-Right
+    if tr > 0:
+        cv2.rectangle(corner_mask, (x2-tr, y1), (x2, y1+tr), 0, -1)
+        cv2.circle(corner_mask, (x2-tr, y1+tr), tr, 1, -1)
+    # Bottom-Left
+    if bl > 0:
+        cv2.rectangle(corner_mask, (x1, y2-bl), (x1+bl, y2), 0, -1)
+        cv2.circle(corner_mask, (x1+bl, y2-bl), bl, 1, -1)
+    # Bottom-Right
+    if br > 0:
+        cv2.rectangle(corner_mask, (x2-br, y2-br), (x2, y2), 0, -1)
+        cv2.circle(corner_mask, (x2-br, y2-br), br, 1, -1)
+        
+    final_mask = cv2.bitwise_and(mask, corner_mask)
+    return final_mask.astype(bool)
 
 @st.cache_data
 def analyze_cells(img, mask, sens, round_val, min_a, max_a):
@@ -87,7 +94,7 @@ def analyze_cells(img, mask, sens, round_val, min_a, max_a):
     return valid
 
 # --- MAIN APP UI ---
-uploaded_file = st.file_uploader("Upload Image", type=["jpg", "png", "tif", "tiff"])
+uploaded_file = st.file_uploader("Upload Microscopy Image", type=["jpg", "png", "tif", "tiff"])
 
 if uploaded_file:
     raw_img = np.array(Image.open(uploaded_file))
@@ -98,10 +105,10 @@ if uploaded_file:
     
     h, w = gray_img.shape
     
-    # 1. Update Mask (Instant)
+    # Update Mask (Instant Preview)
     analysis_mask = create_custom_mask(h, w, t_trim, b_trim, l_trim, r_trim, tl_rad, tr_rad, bl_rad, br_rad)
     
-    # 2. Red Overlay Preview
+    # Red Overlay for "Edited Out" areas
     overlay = (gray_img * 255).astype(np.uint8)
     overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2RGB)
     red_shroud = np.zeros_like(overlay)
@@ -111,23 +118,37 @@ if uploaded_file:
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("Step 1: Align Mask")
+        st.subheader("1. Align Chip Shape")
         st.image(overlay, use_column_width=True)
         run_btn = st.button("🚀 Run Analysis", use_container_width=True)
 
     with col2:
-        st.subheader("Step 2: Results")
+        st.subheader("2. Analysis Results")
         if run_btn:
-            with st.spinner("Counting..."):
+            with st.spinner("Processing..."):
                 cells = analyze_cells(gray_img, analysis_mask, sensitivity, roundness, min_area, max_area)
                 res_disp = (gray_img * 255).astype(np.uint8)
                 res_disp = cv2.cvtColor(res_disp, cv2.COLOR_GRAY2RGB)
+                
+                # Data for CSV export
+                data = []
                 for c in cells:
                     y, x = c.centroid
                     rad = int(c.equivalent_diameter_area / 2 * 1.2)
                     cv2.circle(res_disp, (int(x), int(y)), rad, (0, 255, 0), 2)
+                    data.append({"Cell_ID": len(data)+1, "X": x, "Y": y, "Area_px2": c.area})
                 
                 st.image(res_disp, use_column_width=True)
-                st.metric("Cell Count", len(cells))
+                st.metric("Final Cell Count", len(cells))
+                
+                # --- EXPORT SECTION ---
+                df = pd.DataFrame(data)
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download Results as CSV",
+                    data=csv,
+                    file_name=f"count_result_{len(cells)}.csv",
+                    mime='text/csv',
+                )
         else:
-            st.info("Design your mask on the left, then click 'Run Analysis'.")
+            st.info("Align the red shroud with your chip walls, then click 'Run Analysis'.")
