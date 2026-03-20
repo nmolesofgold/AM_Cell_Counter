@@ -15,39 +15,35 @@ with st.sidebar:
     with st.expander("How to use this tool"):
         st.write("""
         1. **Upload** your microscopy image.
-        2. **Align the Mask** using the Trims and Corner sliders. The **Red Area** will be ignored.
+        2. **Align the Mask** by typing your Boundary Trim and Corner Radius values. The **Red Area** will be ignored.
         3. **Set Sensitivity** based on cell brightness.
         4. **Filter by Size** to remove dust or large debris.
         5. Click **Run Analysis** to see results.
         """)
-    
-    st.info("💡 **Pro-Tip:** For any slider, you can click the number on the far right to type an exact value instead of dragging!")
     st.markdown("---")
 
 # --- SIDEBAR: CHIP SHAPE DESIGNER ---
 st.sidebar.header("📐 Chip Shape Designer")
 
 with st.sidebar.expander("✂️ Boundary Trims (px)", expanded=True):
-    t_trim = st.slider("Top Trim (px)", 0, 2000, 100)
-    b_trim = st.slider("Bottom Trim (px)", 0, 2000, 100)
-    l_trim = st.slider("Left Trim (px)", 0, 2000, 50)
-    r_trim = st.slider("Right Trim (px)", 0, 2000, 50)
+    t_trim = st.number_input("Top Trim (px)", 0, 2000, 100, step=10, help="Removes rows from the top of the image.")
+    b_trim = st.number_input("Bottom Trim (px)", 0, 2000, 100, step=10, help="Removes rows from the bottom.")
+    l_trim = st.number_input("Left Trim (px)", 0, 2000, 50, step=10, help="Removes columns from the left side.")
+    r_trim = st.number_input("Right Trim (px)", 0, 2000, 50, step=10, help="Removes columns from the right side.")
 
 with st.sidebar.expander("🌀 Corner Rounding (px)", expanded=True):
-    tl_rad = st.slider("Top-Left Radius (px)", 0, 3000, 100)
-    tr_rad = st.slider("Top-Right Radius (px)", 0, 3000, 100)
-    bl_rad = st.slider("Bottom-Left Radius (px)", 0, 3000, 100)
-    br_rad = st.slider("Bottom-Right Radius (px)", 0, 3000, 100)
+    tl_rad = st.number_input("Top-Left Radius (px)", 0, 3000, 100, step=10, help="Curves the top-left corner.")
+    tr_rad = st.number_input("Top-Right Radius (px)", 0, 3000, 100, step=10, help="Curves the top-right corner.")
+    bl_rad = st.number_input("Bottom-Left Radius (px)", 0, 3000, 100, step=10, help="Curves the bottom-left corner.")
+    br_rad = st.number_input("Bottom-Right Radius (px)", 0, 3000, 100, step=10, help="Curves the bottom-right corner.")
 
 st.sidebar.markdown("---")
 
-# --- SIDEBAR: DETECTION SETTINGS (NOW TYPABLE) ---
+# --- SIDEBAR: DETECTION SETTINGS ---
 st.sidebar.header("⚙️ Detection Settings")
 
-# Opacity Control for the visual display
-opacity = st.sidebar.slider("🟢 Circle Opacity", 0.0, 1.0, 0.4, 0.05, help="0.0 is invisible, 1.0 is solid color.")
+opacity = st.sidebar.number_input("🟢 Circle Opacity", 0.0, 1.0, 0.4, 0.05, help="0.0 is invisible, 1.0 is solid color.")
 
-# Using number_input for explicit typing
 sensitivity = st.sidebar.number_input(
     "Sensitivity (Multiplier)", 0.1, 1.5, 0.5, 0.05, 
     help="Multiplier for the brightness threshold. Lower catches dim cells; Higher only catches bright cells."
@@ -60,11 +56,11 @@ roundness = st.sidebar.number_input(
 
 st.sidebar.subheader("📏 Size Filters (px²)")
 min_area = st.sidebar.number_input(
-    "Min Area (px²)", 1, 500, 15, 
+    "Min Area (px²)", 1, 500, 15, step=5,
     help="The 'Dust Filter.' Any object smaller than this is ignored."
 )
 max_area = st.sidebar.number_input(
-    "Max Area (px²)", 100, 10000, 800, 
+    "Max Area (px²)", 100, 10000, 800, step=50,
     help="The 'Clump Filter.' Any object larger than this is ignored."
 )
 
@@ -135,11 +131,8 @@ if uploaded_file:
             with st.spinner("Executing Watershed Algorithm..."):
                 cells = analyze_cells(gray_img, analysis_mask, sensitivity, roundness, min_area, max_area)
                 
-                # --- NEW TRANSPARENCY DRAWING LOGIC ---
                 res_disp = (gray_img * 255).astype(np.uint8)
                 res_disp = cv2.cvtColor(res_disp, cv2.COLOR_GRAY2RGB)
-                
-                # Create a blank overlay just for the filled circles
                 circle_overlay = res_disp.copy()
                 
                 data = []
@@ -147,15 +140,11 @@ if uploaded_file:
                     y, x = c.centroid
                     rad = int(c.equivalent_diameter_area / 2 * 1.2)
                     
-                    # 1. Draw solid filled circle on the overlay
                     cv2.circle(circle_overlay, (int(x), int(y)), rad, (0, 255, 0), -1) 
-                    
-                    # 2. Draw a crisp, thin border on the main image
                     cv2.circle(res_disp, (int(x), int(y)), rad, (0, 255, 0), 1)
                     
                     data.append({"Cell_ID": len(data)+1, "X": x, "Y": y, "Area_px2": c.area})
                 
-                # Blend the filled circles with the main image based on the Opacity slider
                 cv2.addWeighted(circle_overlay, opacity, res_disp, 1 - opacity, 0, res_disp)
                 
                 st.image(res_disp, use_column_width=True)
